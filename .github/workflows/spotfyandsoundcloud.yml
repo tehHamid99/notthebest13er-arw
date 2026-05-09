@@ -1,15 +1,16 @@
-name: "دانلودر اسپاتیفای و ساندکلاد"
+```yaml
+name: "Spotify & SoundCloud Downloader"
 
 on:
   workflow_dispatch:
     inputs:
       media_url:
-        description: "Spotify / SoundCloud URL"
+        description: "Spotify or SoundCloud URL"
         required: true
         type: string
 
       output_format:
-        description: "نوع خروجی"
+        description: "Output Format"
         required: true
         type: choice
         options:
@@ -18,8 +19,8 @@ on:
         default: mp3
 
       audio_quality:
-        description: "کیفیت صدا"
-        required: false
+        description: "Audio Quality"
+        required: true
         type: choice
         options:
           - 128k
@@ -28,13 +29,13 @@ on:
         default: 320k
 
       max_part_mb:
-        description: "حداکثر حجم هر پارت (MB)"
+        description: "Max Part Size (MB)"
         required: false
         type: string
         default: "1800"
 
       upload_method:
-        description: "روش آپلود"
+        description: "Upload Method"
         required: true
         type: choice
         options:
@@ -43,7 +44,7 @@ on:
         default: repository
 
       release_tag:
-        description: "نام تگ ریلیز"
+        description: "Release Tag"
         required: false
         type: string
         default: ""
@@ -66,52 +67,64 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y ffmpeg python3 python3-pip zip
+          sudo apt-get install -y docker.io ffmpeg curl zip jq python3 python3-pip
 
-          pip3 install --quiet -U spotdl yt-dlp
+          pip3 install --quiet yt-dlp
 
-      - name: Download Media
-        id: download
+      - name: Create Download Folder
+        run: mkdir -p release_files
+
+      - name: Start Downtify
+        if: contains(github.event.inputs.media_url, 'spotify.com')
         shell: bash
         run: |
-          mkdir -p release_files
+          docker run -d \
+            --name downtify \
+            -p 8000:8000 \
+            ghcr.io/henriquesebastiao/downtify:latest
 
+          echo "Waiting for Downtify..."
+          sleep 25
+
+      - name: Download Spotify Media
+        if: contains(github.event.inputs.media_url, 'spotify.com')
+        shell: bash
+        run: |
+          URL="${{ github.event.inputs.media_url }}"
+
+          echo "Spotify detected"
+
+          RESPONSE=$(curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"url\":\"$URL\"}" \
+            http://localhost:8000/api/download)
+
+          echo "$RESPONSE"
+
+          sleep 20
+
+          find . -type f \( -iname "*.mp3" -o -iname "*.flac" \) -exec mv {} release_files/ \;
+
+      - name: Download SoundCloud Media
+        if: contains(github.event.inputs.media_url, 'soundcloud.com')
+        shell: bash
+        run: |
           URL="${{ github.event.inputs.media_url }}"
           FORMAT="${{ github.event.inputs.output_format }}"
           QUALITY="${{ github.event.inputs.audio_quality }}"
 
-          echo "Downloading media..."
+          echo "SoundCloud detected"
 
-          if [[ "$URL" == *"spotify.com"* ]]; then
-            echo "Spotify detected"
+          yt-dlp \
+            -x \
+            --audio-format "$FORMAT" \
+            --audio-quality "$QUALITY" \
+            -o "release_files/%(title)s.%(ext)s" \
+            "$URL"
 
-            if [[ "$FORMAT" == "flac" ]]; then
-              spotdl download "$URL" \
-                --format flac \
-                --bitrate disable \
-                --output "release_files/{title}.{output-ext}"
-            else
-              spotdl download "$URL" \
-                --format mp3 \
-                --bitrate "$QUALITY" \
-                --output "release_files/{title}.{output-ext}"
-            fi
-
-          elif [[ "$URL" == *"soundcloud.com"* ]]; then
-            echo "SoundCloud detected"
-
-            yt-dlp \
-              -x \
-              --audio-format "$FORMAT" \
-              --audio-quality "$QUALITY" \
-              -o "release_files/%(title)s.%(ext)s" \
-              "$URL"
-
-          else
-            echo "::error::Unsupported URL"
-            exit 1
-          fi
-
+      - name: Validate Download
+        shell: bash
+        run: |
           FILE_COUNT=$(find release_files -type f | wc -l)
 
           if [ "$FILE_COUNT" -eq 0 ]; then
@@ -119,10 +132,8 @@ jobs:
             exit 1
           fi
 
-          FIRST_FILE=$(find release_files -type f | head -n 1)
-          BASENAME=$(basename "$FIRST_FILE")
-
-          echo "filename=$BASENAME" >> "$GITHUB_OUTPUT"
+          echo "Downloaded files:"
+          ls -lh release_files/
 
       - name: Split Large Files
         shell: bash
@@ -182,14 +193,16 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || format('media-{0}', github.run_number) }}
-          name: "Spotify and SoundCloud Download"
+          name: "Spotify & SoundCloud Download"
           body: |
-            Spotify / SoundCloud Download
+            Media Download Complete
 
             URL: ${{ github.event.inputs.media_url }}
             Format: ${{ github.event.inputs.output_format }}
             Quality: ${{ github.event.inputs.audio_quality }}
-            Date: ${{ steps.get_date.outputs.date }}
+            Downloaded on: ${{ steps.get_date.outputs.date }}
+
+            Powered by Meli-Action ⚡
           files: release_files/*
 
         env:
@@ -199,4 +212,6 @@ jobs:
         if: always()
         shell: bash
         run: |
+          docker rm -f downtify 2>/dev/null || true
           rm -rf release_files
+```
